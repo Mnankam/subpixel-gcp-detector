@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  APT_PACKAGES: cmake ninja-build libopencv-dev libeigen3-dev libgtest-dev
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Static checks
+  # -------------------------------------------------------------------------
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-format
+      - name: Check formatting
+        run: |
+          clang-format --version
+          find include src apps tests -name '*.hpp' -o -name '*.cpp' \
+            | xargs clang-format --dry-run --Werror
+
+  # -------------------------------------------------------------------------
+  # Build + unit tests (GCC / Clang, Release / sanitizers)
+  # -------------------------------------------------------------------------
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-release
+            cxx: g++
+            build_type: Release
+            sanitizers: OFF
+          - name: clang-release
+            cxx: clang++
+            build_type: Release
+            sanitizers: OFF
+          - name: gcc-debug-asan-ubsan
+            cxx: g++
+            build_type: Debug
+            sanitizers: ON
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $APT_PACKAGES
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DGCP_WARNINGS_AS_ERRORS=ON
+          -DGCP_ENABLE_SANITIZERS=${{ matrix.sanitizers }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+      - name: Upload binaries
+        if: matrix.name == 'gcc-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcp-tools-linux-x64
+          path: |
+            build/gcp_detect
+            build/gcp_eval
+
+  # -------------------------------------------------------------------------
+  # Accuracy benchmark -> job summary (regression visibility on every PR)
+  # -------------------------------------------------------------------------
+  benchmark:
+    name: accuracy benchmark
+    needs: build-test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopencv-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: gcp-tools-linux-x64
+          path: bin
+      - name: Run Monte-Carlo benchmark
+        run: |
+          chmod +x bin/*
+          bin/gcp_eval --trials 100 | tee benchmark.md
+          cat benchmark.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: benchmark.md
+
+  # -------------------------------------------------------------------------
+  # Docker image -> GitHub Container Registry (push only on main / tags)
+  # -------------------------------------------------------------------------
+  docker:
+    name: docker image
+    needs: build-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build (and push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  # Release: attach binaries + benchmark to a GitHub release on version tags
+  # -------------------------------------------------------------------------
+  release:
+    name: github release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-test, benchmark, docker]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar -C dist/gcp-tools-linux-x64 -czf gcp-tools-linux-x64.tar.gz .
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file dist/benchmark/benchmark.md \
+            gcp-tools-linux-x64.tar.gz
