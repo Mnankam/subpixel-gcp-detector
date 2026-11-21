@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: build + test
 # ---------------------------------------------------------------------------
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -28,7 +28,7 @@ RUN cmake -S . -B build -G Ninja \
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image (only the OpenCV runtime libraries)
 # ---------------------------------------------------------------------------
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:26.04 AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
