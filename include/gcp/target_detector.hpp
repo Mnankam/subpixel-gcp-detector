@@ -4,6 +4,7 @@
 
 #include <opencv2/core.hpp>
 
+#include <optional>
 #include <vector>
 
 namespace gcp {
@@ -64,6 +65,12 @@ class TargetDetector {
 
   /// Detect all targets in `image` (8-bit grey or BGR).
   [[nodiscard]] std::vector<Detection> detect(const cv::Mat& image) const;
+
+  /// Phase B + strict validation for a single known approximate position,
+  /// e.g. the predicted position of a tracked target. `gray` must be CV_8UC1,
+  /// `scale` is the approximate quadrant side length in pixels.
+  [[nodiscard]] std::optional<Detection> verify(const cv::Mat& gray, cv::Point2d guess,
+                                                double scale) const;
 
   [[nodiscard]] const DetectorParams& params() const noexcept { return params_; }
 

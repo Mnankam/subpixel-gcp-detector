@@ -243,24 +243,9 @@ std::vector<Detection> TargetDetector::detect(const cv::Mat& image) const {
       return cv::norm(d.center - cand.p) < 0.25 * std::min(d.scale, cand.scale);
     });
     if (known) continue;
-    const double r_inner = std::max(3.0, 0.3 * cand.scale);
     const double r_outer = std::max(5.0, 0.6 * cand.scale);
     if (!checkSaddleRing(gray, cand.p, r_outer, loose).valid) continue;
-
-    RefinerParams rp = p.refiner;
-    rp.half_window = std::clamp(static_cast<int>(std::lround(0.35 * cand.scale)), p.min_half_window,
-                                p.max_half_window);
-    const RefineResult res = SaddleRefiner(rp).refine(gray, cand.p);
-    if (!res.converged || res.residual_rms > p.max_residual_ratio * rp.half_window) continue;
-    if (cv::norm(res.center - cand.p) > 0.3 * cand.scale) continue;
-
-    const RingCheck inner = checkSaddleRing(gray, res.center, r_inner, p);
-    if (!inner.valid) continue;
-    const RingCheck outer = checkSaddleRing(gray, res.center, r_outer, p);
-    if (!outer.valid) continue;
-
-    detections.push_back({res.center, cand.scale, std::min(inner.contrast, outer.contrast),
-                          res.residual_rms, res.isotropy});
+    if (auto d = verify(gray, cand.p, cand.scale)) detections.push_back(*d);
   }
 
   // Non-maximum suppression (several quads share one centre).
@@ -274,6 +259,28 @@ std::vector<Detection> TargetDetector::detect(const cv::Mat& image) const {
     if (!dup) kept.push_back(d);
   }
   return kept;
+}
+
+std::optional<Detection> TargetDetector::verify(const cv::Mat& gray, cv::Point2d guess,
+                                                double scale) const {
+  CV_Assert(gray.type() == CV_8UC1);
+  const DetectorParams& p = params_;
+  RefinerParams rp = p.refiner;
+  rp.half_window =
+      std::clamp(static_cast<int>(std::lround(0.35 * scale)), p.min_half_window, p.max_half_window);
+  const RefineResult res = SaddleRefiner(rp).refine(gray, guess);
+  if (!res.converged || res.residual_rms > p.max_residual_ratio * rp.half_window) {
+    return std::nullopt;
+  }
+  if (cv::norm(res.center - guess) > 0.3 * scale) return std::nullopt;
+
+  const RingCheck inner = checkSaddleRing(gray, res.center, std::max(3.0, 0.3 * scale), p);
+  if (!inner.valid) return std::nullopt;
+  const RingCheck outer = checkSaddleRing(gray, res.center, std::max(5.0, 0.6 * scale), p);
+  if (!outer.valid) return std::nullopt;
+
+  return Detection{res.center, scale, std::min(inner.contrast, outer.contrast), res.residual_rms,
+                   res.isotropy};
 }
 
 }  // namespace gcp

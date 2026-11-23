@@ -87,6 +87,7 @@ jobs:
           path: |
             build/gcp_detect
             build/gcp_eval
+            build/gcp_live
 
   # -------------------------------------------------------------------------
   # Accuracy benchmark -> job summary (regression visibility on every PR)
@@ -109,6 +110,8 @@ jobs:
           chmod +x bin/*
           bin/gcp_eval --trials 100 | tee benchmark.md
           cat benchmark.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Live tracking benchmark (synthetic camera)
+        run: bin/gcp_live --source synthetic --frames 150 --quiet 2>> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark
