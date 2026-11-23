@@ -101,7 +101,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libopencv-dev
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: gcp-tools-linux-x64
           path: bin
@@ -172,7 +172,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Create release
