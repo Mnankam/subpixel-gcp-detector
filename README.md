@@ -164,6 +164,78 @@ gcp::SaddleRefiner refiner({.half_window = 9});     // refine your own initial g
 auto r = refiner.refine(gray, {412.0, 233.0});
 ```
 
+## Live camera mode (Basler pylon / GenICam)
+
+![Live tracking](docs/live_tracking.png)
+
+`gcp_live` runs the detector on an image stream: a **Basler camera via the pylon SDK**, the
+**pylon camera emulator** (no hardware needed), a list of image files, or a synthetic moving
+scene with ground truth.
+
+```
+FrameSource (interface)
+ ├── SyntheticSource   moving targets + exact ground truth (CI)
+ ├── ImageFileSource   recorded image sequences
+ └── PylonSource       Basler cameras / emulator via GenICam (optional, GCP_WITH_PYLON)
+          │
+       Tracker ── constant-velocity prediction ─► SaddleRefiner + ring test   (≈ 1 ms)
+          └────── every N frames / on loss ─────► full TargetDetector        (≈ 40 ms)
+```
+
+The full detector (CLAHE, thresholds, contours) is expensive; refining a *known* target is not.
+The tracker therefore only refines each target at its predicted position and falls back to full
+detection every N frames or when a target is lost.
+
+Synthetic 1280×720 stream, 2 moving and tilting targets, 300 frames:
+
+| Metric | Value |
+|---|---:|
+| Tracking update, median | **0.95 ms** |
+| Full detection, median | 42 ms |
+| Full detections needed | 10 of 300 frames |
+| Ground-truth RMSE | **0.017 px** (600 measurements, 0 missed) |
+
+### Camera parameters through GenICam
+
+`PylonSource` opens the first camera (or a given serial number), sets `PixelFormat=Mono8`,
+switches off `ExposureAuto`/`GainAuto` when values are given, and sets `ExposureTime`
+(falls back to the SFNC 1.x name `ExposureTimeAbs`) and `Gain`. It grabs with
+`GrabStrategy_LatestImageOnly` – live processing should always work on the newest frame instead
+of building up latency in a queue. Incomplete buffers (e.g. GigE packet loss) are skipped, not
+fatal. Non-Mono8 formats (Bayer, Mono12) go through `CImageFormatConverter`.
+
+### Build with pylon
+
+1. Install the free [pylon Software Suite](https://www.baslerweb.com/en/downloads/software/)
+   including the SDK and the camera emulation support.
+2. Configure with pylon (and optionally the preview window):
+
+```bash
+cmake -S . -B build -DGCP_WITH_PYLON=ON -DGCP_WITH_GUI=ON
+# Windows, if pylon is not found automatically:
+#   -DCMAKE_PREFIX_PATH="C:/Program Files/Basler/pylon/Development/CMake"
+cmake --build build
+```
+
+3. Run against the emulator – no camera required:
+
+```bash
+export PYLON_CAMEMU=1                       # Windows PowerShell: $env:PYLON_CAMEMU=1
+./build/gcp_live --source pylon --emulator --emu-images docs/demo_scene.png --show
+```
+
+4. Real camera:
+
+```bash
+./build/gcp_live --source pylon --exposure-us 2000 --gain-db 0 --show
+./build/gcp_live --source pylon --serial 40012345 --frames 0 > tracks.csv
+```
+
+Other sources: `gcp_live --source synthetic --frames 300`, `gcp_live --source files img_*.png`.
+Without `-DGCP_WITH_PYLON=ON` everything else builds and runs; `--source pylon` then reports that
+support is missing. CI builds without pylon (the SDK is not redistributable) and runs the
+synthetic live benchmark on every push.
+
 ## CI/CD
 
 | Job | What it does |
@@ -171,7 +243,7 @@ auto r = refiner.refine(gray, {412.0, 233.0});
 | `clang-format` | style check |
 | `gcc-release`, `clang-release` | build with `-Werror`, run unit tests |
 | `gcc-debug-asan-ubsan` | tests under AddressSanitizer + UndefinedBehaviorSanitizer |
-| `accuracy benchmark` | runs `gcp_eval`, posts the table to the job summary |
+| `accuracy benchmark` | runs `gcp_eval` and the synthetic `gcp_live` stream, posts both tables to the job summary |
 | `docker image` | builds the image; pushes to GHCR on `main` and on tags |
 | `github release` | on `v*` tags: binaries + benchmark attached to a release |
 
@@ -182,7 +254,8 @@ Dependabot keeps the GitHub Actions and the Docker base image up to date.
 ```
 include/gcp/        public headers (detector, refiner, synthetic renderer)
 src/                implementation
-apps/               gcp_detect (CLI), gcp_eval (benchmark)
+apps/               gcp_detect (CLI), gcp_eval (benchmark), gcp_live (camera / stream)
+src/io/             image file source, Basler pylon source
 tests/              GoogleTest suite (accuracy, robustness, false positives)
 docs/               figures
 .github/workflows/  CI/CD
@@ -195,6 +268,7 @@ docs/               figures
   only covers the artefacts that are modelled.
 * Large images: tiling + parallel candidate refinement (`std::execution` / TBB).
 * Target identification (coded targets / ArUco ID next to the checkerboard).
+* Hardware trigger and multi-camera synchronisation (`CInstantCameraArray`, PTP on GigE).
 
 ## References
 

@@ -18,9 +18,20 @@ option(GCP_BUILD_TESTS          "Build unit tests"                     ON)
 option(GCP_BUILD_APPS           "Build command line tools"             ON)
 option(GCP_WARNINGS_AS_ERRORS   "Treat compiler warnings as errors"    OFF)
 option(GCP_ENABLE_SANITIZERS    "Enable ASan + UBSan (Debug builds)"   OFF)
+option(GCP_WITH_PYLON           "Basler pylon camera support (needs pylon SDK)" OFF)
+option(GCP_WITH_GUI             "Live preview window via OpenCV highgui" OFF)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+if(GCP_WITH_GUI)
+  find_package(OpenCV REQUIRED COMPONENTS highgui)
+endif()
+if(GCP_WITH_PYLON)
+  # The pylon installer provides pylonConfig.cmake (target pylon::pylon).
+  # Windows: set CMAKE_PREFIX_PATH to "C:/Program Files/Basler/pylon/Development/CMake"
+  # if it is not found automatically.
+  find_package(pylon REQUIRED)
+endif()
 
 # ---------------------------------------------------------------------------
 # Common compile options
@@ -40,7 +51,9 @@ endif()
 add_library(gcp
   src/saddle_refiner.cpp
   src/target_detector.cpp
-  src/synthetic.cpp)
+  src/synthetic.cpp
+  src/synthetic_source.cpp
+  src/tracker.cpp)
 add_library(gcp::gcp ALIAS gcp)
 
 target_include_directories(gcp PUBLIC
@@ -49,6 +62,19 @@ target_include_directories(gcp PUBLIC
 target_link_libraries(gcp
   PUBLIC  opencv_core opencv_imgproc
   PRIVATE Eigen3::Eigen gcp_options)
+
+# ---------------------------------------------------------------------------
+# I/O library: image files and cameras (optional Basler pylon / GenICam)
+# ---------------------------------------------------------------------------
+add_library(gcp_io
+  src/io/image_file_source.cpp
+  src/io/pylon_source.cpp)
+add_library(gcp::io ALIAS gcp_io)
+target_link_libraries(gcp_io PUBLIC gcp PRIVATE opencv_imgcodecs gcp_options)
+if(GCP_WITH_PYLON)
+  target_link_libraries(gcp_io PRIVATE pylon::pylon)
+  target_compile_definitions(gcp_io PRIVATE GCP_HAVE_PYLON)
+endif()
 
 # ---------------------------------------------------------------------------
 # Applications
@@ -60,10 +86,17 @@ if(GCP_BUILD_APPS)
   add_executable(gcp_eval apps/gcp_eval.cpp)
   target_link_libraries(gcp_eval PRIVATE gcp opencv_imgcodecs gcp_options)
 
-  install(TARGETS gcp_detect gcp_eval RUNTIME DESTINATION bin)
+  add_executable(gcp_live apps/gcp_live.cpp)
+  target_link_libraries(gcp_live PRIVATE gcp_io opencv_imgcodecs opencv_imgproc gcp_options)
+  if(GCP_WITH_GUI)
+    target_link_libraries(gcp_live PRIVATE opencv_highgui)
+    target_compile_definitions(gcp_live PRIVATE GCP_HAVE_HIGHGUI)
+  endif()
+
+  install(TARGETS gcp_detect gcp_eval gcp_live RUNTIME DESTINATION bin)
 endif()
 
-install(TARGETS gcp ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(TARGETS gcp gcp_io ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 
 # ---------------------------------------------------------------------------
